@@ -2,6 +2,10 @@
 
 **Trustless GitHub bounties, adjudicated by AI validator consensus on GenLayer studionet.**
 
+- **Live app:** <https://bountybot-genlayer.vercel.app>
+- **Contract:** [`0xB310782fD5C93C67be9f78Fedb34B4E53532fbf0`](https://genlayer-explorer.vercel.app/address/0xB310782fD5C93C67be9f78Fedb34B4E53532fbf0) on GenLayer studionet
+- **Repo:** <https://github.com/phu1271997/bountybot>
+
 Sponsors lock GEN against a public GitHub issue. Contributors claim a bounty by
 submitting a Pull Request. The GenLayer Intelligent Contract then reads the
 issue page, the PR page, and the raw PR diff **directly on-chain** (no oracle,
