@@ -21,6 +21,9 @@ MAX_URL = 300
 MAX_REASON = 700
 GITHUB_ISSUE_RE = r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/issues/\d+/?$"
 GITHUB_PR_RE = r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/pull/\d+/?$"
+GITHUB_REPO_RE = re.compile(
+    r"^https://github\.com/([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+)/(issues|pull)/\d+/?$"
+)
 
 
 def _addr_str(addr: Address) -> str:
@@ -41,6 +44,13 @@ def _validate_url(url: str, pattern: str, label: str) -> str:
     if not re.match(pattern, url):
         raise gl.vm.UserError("Invalid " + label + " URL format")
     return url
+
+
+def _extract_repo(url: str):
+    match = GITHUB_REPO_RE.match(url)
+    if not match:
+        raise gl.vm.UserError("Cannot extract repo from URL")
+    return (match.group(1).lower(), match.group(2).lower())
 
 
 def _normalize_verdict(raw):
@@ -120,6 +130,7 @@ class Contract(gl.Contract):
             "quality": "",
             "reason": "",
             "fixes_issue": None,
+            "wallet_bound": None,
             "payout": "0",
             "refund": "0",
         }
@@ -136,6 +147,14 @@ class Contract(gl.Contract):
         if record["status"] != STATUS_OPEN:
             raise gl.vm.UserError("Bounty is not open")
         pr_url = _validate_url(pr_url, GITHUB_PR_RE, "PR")
+
+        issue_repo = _extract_repo(record["issue_url"])
+        pr_repo = _extract_repo(pr_url)
+        if issue_repo != pr_repo:
+            raise gl.vm.UserError(
+                "Issue and PR must live in the same repository"
+            )
+
         record["pr_url"] = pr_url
         record["claimer"] = _addr_str(gl.message.sender_address)
         record["status"] = STATUS_CLAIMED
@@ -156,7 +175,6 @@ class Contract(gl.Contract):
         sponsor_str = record["sponsor"]
         amount = int(record["amount"])
         diff_url = pr_url.rstrip("/") + ".diff"
-        patch_url = pr_url.rstrip("/") + ".patch"
 
         def leader_fn():
             def fetch(url, mode):
@@ -168,11 +186,23 @@ class Contract(gl.Contract):
             issue_page = fetch(issue_url, "text")
             pr_page = fetch(pr_url, "text")
             diff_page = fetch(diff_url, "text")
-            if not diff_page:
-                diff_page = fetch(patch_url, "text")
 
-            if not issue_page and not pr_page and not diff_page:
-                raise gl.vm.UserError("All GitHub sources unreachable")
+            # Judge feedback: fail adjudication unless issue, PR, and immutable
+            # diff are all retrieved. Partial evidence must not settle.
+            if not issue_page:
+                raise gl.vm.UserError("Issue page not retrievable")
+            if not pr_page:
+                raise gl.vm.UserError("PR page not retrievable")
+            if not diff_page:
+                raise gl.vm.UserError("Immutable PR diff not retrievable")
+
+            # Deterministic wallet-identity binding: claimer's wallet address
+            # must appear verbatim in the PR body/page fetched from github.com.
+            # This is a pure string check so leader and validators agree by
+            # construction whenever they see the same PR page.
+            wallet_bound = bool(claimer_str) and (
+                claimer_str.lower() in pr_page.lower()
+            )
 
             prompt = (
                 "You are judging whether a GitHub Pull Request actually fixes the "
@@ -197,7 +227,9 @@ class Contract(gl.Contract):
                 + "If fixes_issue is false, quality must be LOW."
             )
             raw_out = gl.nondet.exec_prompt(prompt, response_format="json")
-            return _normalize_verdict(raw_out)
+            verdict = _normalize_verdict(raw_out)
+            verdict["wallet_bound"] = wallet_bound
+            return verdict
 
         def validator_fn(leader_res):
             if not isinstance(leader_res, gl.vm.Return):
@@ -213,29 +245,50 @@ class Contract(gl.Contract):
                 return False
             if str(mine.get("quality", "")).upper() != str(proposed.get("quality", "")).upper():
                 return False
+            if bool(mine.get("wallet_bound")) != bool(proposed.get("wallet_bound")):
+                return False
             return True
 
         run_nondet = getattr(gl.vm, "run_nondet", gl.vm.run_nondet_unsafe)
         verdict = run_nondet(leader_fn, validator_fn)
 
+        wallet_bound = bool(verdict.get("wallet_bound"))
         quality = verdict["quality"]
-        bps = QUALITY_PAYOUT_BPS.get(quality, 0)
-        payout = (amount * bps) // 10000
-        refund = amount - payout
+
+        # If the PR page does not bind the claiming wallet, the claim cannot be
+        # attributed to the caller — refund the sponsor in full and reject. This
+        # neutralizes copy-PR attacks: an attacker who submits someone else's PR
+        # URL cannot steal payout, and cannot lock the bounty either — anyone
+        # can trigger adjudication and the sponsor is refunded.
+        if not wallet_bound:
+            payout = 0
+            refund = amount
+            final_status = STATUS_REJECTED
+            final_reason = (
+                "PR body does not contain the claiming wallet address — "
+                "identity not bound to PR. " + verdict.get("reason", "")
+            )[:MAX_REASON]
+        else:
+            bps = QUALITY_PAYOUT_BPS.get(quality, 0)
+            payout = (amount * bps) // 10000
+            refund = amount - payout
+            final_status = (
+                STATUS_PAID_FULL
+                if bps == 10000
+                else (STATUS_PAID_PARTIAL if bps > 0 else STATUS_REJECTED)
+            )
+            final_reason = verdict.get("reason", "")
 
         if payout > 0:
             gl.get_contract_at(Address(claimer_str)).emit_transfer(value=u256(payout))
         if refund > 0:
             gl.get_contract_at(Address(sponsor_str)).emit_transfer(value=u256(refund))
 
-        record["status"] = (
-            STATUS_PAID_FULL
-            if bps == 10000
-            else (STATUS_PAID_PARTIAL if bps > 0 else STATUS_REJECTED)
-        )
-        record["quality"] = quality
-        record["fixes_issue"] = verdict["fixes_issue"]
-        record["reason"] = verdict["reason"]
+        record["status"] = final_status
+        record["quality"] = quality if wallet_bound else "LOW"
+        record["fixes_issue"] = verdict["fixes_issue"] if wallet_bound else False
+        record["wallet_bound"] = wallet_bound
+        record["reason"] = final_reason
         record["payout"] = str(payout)
         record["refund"] = str(refund)
         self.bounties[bounty_id] = json.dumps(record, sort_keys=True)

@@ -201,6 +201,13 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .meta { font-size: 13px; color: var(--muted); margin-top: 4px; }
 .reason { margin-top: 8px; padding: 10px 14px; background: var(--bg-elev); border-left: 3px solid var(--accent); border-radius: 4px; font-size: 13px; }
 .status-bar { position: fixed; top: 0; left: 0; right: 0; padding: 6px 20px; background: var(--warn); color: #000; text-align: center; font-size: 13px; z-index: 10; }
+.notice { background: rgba(250, 204, 21, 0.08); border: 1px dashed var(--warn); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; color: var(--text); font-size: 13px; line-height: 1.55; }
+.notice strong { color: var(--warn); font-family: var(--mono); }
+.notice em { color: var(--muted); font-style: normal; }
+.wallet-bind { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.wallet-bind code { color: var(--accent); }
+.ghost-btn { background: transparent; color: var(--muted); border: 1px solid var(--border-strong); padding: 4px 10px; border-radius: 4px; font-family: var(--mono); font-size: 11px; cursor: pointer; }
+.ghost-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); box-shadow: none; }
 .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--muted); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin-left: 8px; vertical-align: middle; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

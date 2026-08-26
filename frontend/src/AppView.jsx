@@ -226,6 +226,32 @@ export default function AppView() {
 
       <div className="card">
         <h3>2 · Claim a bounty</h3>
+        <div className="notice">
+          <strong>Before you submit:</strong>
+          <ol style={{ margin: '6px 0 0 18px', padding: 0 }}>
+            <li>Your PR must live in the <em>same repository</em> as the issue.</li>
+            <li>
+              Paste this <em>exact line</em> into your PR description so validators can
+              bind the claim to your wallet:
+              <div className="wallet-bind">
+                {account ? (
+                  <>
+                    <code>Bounty claim by: {account}</code>
+                    <button
+                      type="button"
+                      className="ghost-btn"
+                      onClick={() => navigator.clipboard?.writeText(`Bounty claim by: ${account}`)}
+                    >
+                      Copy
+                    </button>
+                  </>
+                ) : (
+                  <em>Connect your wallet to see the exact line to paste.</em>
+                )}
+              </div>
+            </li>
+          </ol>
+        </div>
         <label>Bounty ID</label>
         <input value={claimBid} onChange={(e) => setClaimBid(e.target.value)} placeholder="1" />
         <label>Your PR URL</label>
@@ -242,9 +268,12 @@ export default function AppView() {
       <div className="card">
         <h3>3 · Adjudicate</h3>
         <p style={{ color: 'var(--muted)', fontSize: 13, marginTop: 0 }}>
-          Anyone can trigger AI adjudication once a claim is on-chain. Validator LLMs read the
-          issue and PR diff, judge whether it fixes the issue, and vote. Funds release
-          automatically. This transaction takes 30–120 seconds because validators do real
+          Anyone can trigger AI adjudication once a claim is on-chain. Validator LLMs fetch
+          the issue page, the PR page, <em>and</em> the immutable <code>.diff</code> — if
+          any of the three is unreachable, the transaction reverts (partial evidence never
+          settles). Validators also verify that the claiming wallet address appears
+          verbatim inside the PR body; if it doesn't, the sponsor is refunded 100% and no
+          payout is made. This transaction takes 30–120 seconds because validators do real
           inference before consensus finalizes.
         </p>
         <label>Bounty ID</label>
@@ -297,6 +326,11 @@ export default function AppView() {
             {(b.status === 'PAID_FULL' || b.status === 'PAID_PARTIAL' || b.status === 'REJECTED') && (
               <div className="meta">
                 payout: {formatGen(b.payout)} GEN · refund: {formatGen(b.refund)} GEN
+                {b.wallet_bound === false && (
+                  <span style={{ marginLeft: 10, color: 'var(--bad)' }}>
+                    · identity NOT bound to PR
+                  </span>
+                )}
               </div>
             )}
             {b.reason && (
