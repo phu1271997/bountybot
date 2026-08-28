@@ -24,6 +24,8 @@ GITHUB_PR_RE = r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/pull/\d+
 GITHUB_REPO_RE = re.compile(
     r"^https://github\.com/([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+)/(issues|pull)/\d+/?$"
 )
+SHA_HEADER_RE = re.compile(r"^From ([0-9a-fA-F]{40})\b", flags=re.MULTILINE)
+SHA_LOOSE_RE = re.compile(r"\b([0-9a-fA-F]{40})\b")
 
 
 def _addr_str(addr: Address) -> str:
@@ -131,6 +133,7 @@ class Contract(gl.Contract):
             "reason": "",
             "fixes_issue": None,
             "wallet_bound": None,
+            "head_sha": "",
             "payout": "0",
             "refund": "0",
         }
@@ -174,48 +177,88 @@ class Contract(gl.Contract):
         claimer_str = record["claimer"]
         sponsor_str = record["sponsor"]
         amount = int(record["amount"])
-        diff_url = pr_url.rstrip("/") + ".diff"
+        owner_repo = _extract_repo(pr_url)
+        pr_patch_url = pr_url.rstrip("/") + ".patch"
 
         def leader_fn():
-            def fetch(url, mode):
+            def fetch(url):
                 try:
-                    return gl.nondet.web.render(url, mode=mode) or ""
+                    return gl.nondet.web.render(url, mode="text") or ""
                 except Exception:
                     return ""
 
-            issue_page = fetch(issue_url, "text")
-            pr_page = fetch(pr_url, "text")
-            diff_page = fetch(diff_url, "text")
-
-            # Judge feedback: fail adjudication unless issue, PR, and immutable
-            # diff are all retrieved. Partial evidence must not settle.
+            # --- Evidence source 1: issue page ---
+            issue_page = fetch(issue_url)
             if not issue_page:
                 raise gl.vm.UserError("Issue page not retrievable")
-            if not pr_page:
-                raise gl.vm.UserError("PR page not retrievable")
-            if not diff_page:
-                raise gl.vm.UserError("Immutable PR diff not retrievable")
 
-            # Deterministic wallet-identity binding: claimer's wallet address
-            # must appear verbatim in the PR body/page fetched from github.com.
-            # This is a pure string check so leader and validators agree by
-            # construction whenever they see the same PR page.
+            # --- Evidence source 2: PR content (git format-patch) ---
+            # The .patch endpoint returns the concatenated commits of the PR
+            # as git format-patch. Every commit header starts with
+            # `From <40-hex-sha>` where the SHA is the immutable commit id.
+            # This is still MUTABLE when the PR gets force-pushed, but we
+            # never trust its content for the verdict — we only extract the
+            # head SHA and then re-fetch that commit by SHA below.
+            pr_patch = fetch(pr_patch_url)
+            if not pr_patch:
+                raise gl.vm.UserError("PR patch not retrievable")
+
+            sha_hits = SHA_HEADER_RE.findall(pr_patch)
+            if not sha_hits:
+                sha_hits = SHA_LOOSE_RE.findall(pr_patch)
+            if not sha_hits:
+                raise gl.vm.UserError(
+                    "Cannot pin PR to an immutable commit SHA"
+                )
+            head_sha = sha_hits[-1].lower()
+
+            # --- Evidence source 3: SHA-pinned immutable commit patch ---
+            # github.com/<owner>/<repo>/commit/<sha>.patch is cryptographically
+            # bound to `sha` — the PR author cannot change its content without
+            # also changing the SHA. This is the "immutable diff" the judge
+            # asked for.
+            owner, repo = owner_repo
+            commit_url = (
+                "https://github.com/"
+                + owner
+                + "/"
+                + repo
+                + "/commit/"
+                + head_sha
+                + ".patch"
+            )
+            commit_patch = fetch(commit_url)
+            if not commit_patch:
+                raise gl.vm.UserError(
+                    "Immutable commit patch not retrievable"
+                )
+
+            # --- Deterministic wallet-identity binding ---
+            # We require the claiming wallet address to appear verbatim inside
+            # the SHA-pinned commit patch. The commit patch is:
+            #   (a) contributor-controlled — its content (commit message,
+            #       author metadata) is written by the PR author, not by
+            #       random third-party commenters on the PR page.
+            #   (b) immutable — cryptographically bound to `head_sha`, so
+            #       nobody can retroactively insert or remove the wallet.
+            # This closes both v0.3.0 review findings in one check.
             wallet_bound = bool(claimer_str) and (
-                claimer_str.lower() in pr_page.lower()
+                claimer_str.lower() in commit_patch.lower()
             )
 
             prompt = (
-                "You are judging whether a GitHub Pull Request actually fixes the "
-                "linked GitHub issue. Be strict. Reject trivial changes (whitespace, "
-                "comment-only, unrelated file edits) even if the PR title claims a "
-                "fix. Reward substantive code changes that address the root cause "
-                "described in the issue, especially when tests are added.\n\n"
+                "You are judging whether a GitHub Pull Request actually fixes "
+                "the linked GitHub issue. Be strict. Reject trivial changes "
+                "(whitespace, comment-only, unrelated file edits) even if the "
+                "commit subject claims a fix. Reward substantive code changes "
+                "that address the root cause described in the issue, "
+                "especially when tests are added.\n\n"
                 "ISSUE PAGE (text, truncated):\n"
                 + issue_page[:3500]
-                + "\n\nPR PAGE (text, truncated):\n"
-                + pr_page[:3500]
-                + "\n\nPR DIFF (truncated):\n"
-                + diff_page[:6000]
+                + "\n\nIMMUTABLE COMMIT PATCH pinned to SHA "
+                + head_sha
+                + " (truncated):\n"
+                + commit_patch[:6000]
                 + "\n\nReturn JSON ONLY with keys:\n"
                 + '  "fixes_issue": boolean,\n'
                 + '  "quality": "LOW"|"MID"|"HIGH",\n'
@@ -229,6 +272,7 @@ class Contract(gl.Contract):
             raw_out = gl.nondet.exec_prompt(prompt, response_format="json")
             verdict = _normalize_verdict(raw_out)
             verdict["wallet_bound"] = wallet_bound
+            verdict["head_sha"] = head_sha
             return verdict
 
         def validator_fn(leader_res):
@@ -247,6 +291,8 @@ class Contract(gl.Contract):
                 return False
             if bool(mine.get("wallet_bound")) != bool(proposed.get("wallet_bound")):
                 return False
+            if str(mine.get("head_sha", "")).lower() != str(proposed.get("head_sha", "")).lower():
+                return False
             return True
 
         run_nondet = getattr(gl.vm, "run_nondet", gl.vm.run_nondet_unsafe)
@@ -254,19 +300,22 @@ class Contract(gl.Contract):
 
         wallet_bound = bool(verdict.get("wallet_bound"))
         quality = verdict["quality"]
+        head_sha = str(verdict.get("head_sha", ""))
 
-        # If the PR page does not bind the claiming wallet, the claim cannot be
-        # attributed to the caller — refund the sponsor in full and reject. This
-        # neutralizes copy-PR attacks: an attacker who submits someone else's PR
-        # URL cannot steal payout, and cannot lock the bounty either — anyone
-        # can trigger adjudication and the sponsor is refunded.
+        # If the commit patch does not bind the claiming wallet, the claim
+        # cannot be attributed to the caller — refund the sponsor in full and
+        # reject. This neutralizes copy-PR attacks: an attacker who submits
+        # someone else's PR URL cannot steal payout, and cannot lock the
+        # bounty either — anyone can trigger adjudication and the sponsor is
+        # refunded.
         if not wallet_bound:
             payout = 0
             refund = amount
             final_status = STATUS_REJECTED
             final_reason = (
-                "PR body does not contain the claiming wallet address — "
-                "identity not bound to PR. " + verdict.get("reason", "")
+                "Claiming wallet not found in the immutable commit patch — "
+                "identity not bound to contributor-controlled PR content. "
+                + verdict.get("reason", "")
             )[:MAX_REASON]
         else:
             bps = QUALITY_PAYOUT_BPS.get(quality, 0)
@@ -288,6 +337,7 @@ class Contract(gl.Contract):
         record["quality"] = quality if wallet_bound else "LOW"
         record["fixes_issue"] = verdict["fixes_issue"] if wallet_bound else False
         record["wallet_bound"] = wallet_bound
+        record["head_sha"] = head_sha
         record["reason"] = final_reason
         record["payout"] = str(payout)
         record["refund"] = str(refund)

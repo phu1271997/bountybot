@@ -99,7 +99,8 @@ export default function LandingPage() {
             <p className="term-out">Guard against empty email + regression test</p>
             <p className="term-line"><span className="term-prompt">$</span> bountybot adjudicate 1</p>
             <p className="term-out term-out--muted">→ fetching issue…</p>
-            <p className="term-out term-out--muted">→ fetching PR + .diff…</p>
+            <p className="term-out term-out--muted">→ fetching PR .patch, pinning SHA…</p>
+            <p className="term-out term-out--muted">→ fetching commit/&lt;sha&gt;.patch (immutable)…</p>
             <p className="term-out term-out--muted">→ 5 validator LLMs voting…</p>
             <p className="term-out term-out--ok">✓ verdict: HIGH · payout 100% released to 0x0F73…4089</p>
           </div>

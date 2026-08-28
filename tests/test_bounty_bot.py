@@ -61,20 +61,49 @@ ISSUE_URL = "https://github.com/octocat/hello-world/issues/1"
 PR_URL = "https://github.com/octocat/hello-world/pull/2"
 CROSS_REPO_PR_URL = "https://github.com/other/repo/pull/9"
 BOUNTY_AMOUNT = 1_000_000_000_000_000_000  # 1 GEN
+HEAD_SHA = "abc123def4567890abc123def4567890abc12345"
 
 
-def _bound_pr_page(claimer_addr: str, body: str) -> str:
-    """PR page that binds the claimer wallet in the description."""
+def _pr_patch(head_sha: str, subject: str = "Fix the bug") -> str:
+    """Simulate the `github.com/<owner>/<repo>/pull/<N>.patch` body — a git
+    format-patch. Only the `From <sha>` header line matters for SHA
+    extraction; the rest is filler so the contract can detect it as
+    non-empty."""
     return (
-        body
-        + "\n\nBounty claim by: "
-        + claimer_addr
-        + "\nThis PR is submitted for on-chain bounty settlement.\n"
+        "From "
+        + head_sha
+        + " Mon Sep 17 00:00:00 2001\n"
+        + "From: Contributor <dev@example.com>\n"
+        + "Subject: [PATCH] "
+        + subject
+        + "\n\n"
+        + "diff --git a/x.py b/x.py\n"
+        + "+ pass\n"
+    )
+
+
+def _commit_patch(head_sha: str, wallet: str | None, subject: str = "Fix the bug", diff: str = "+ pass") -> str:
+    """Simulate the immutable `commit/<sha>.patch` body. If `wallet` is
+    provided, it lands in the commit message body — that's contributor-
+    controlled and SHA-pinned content."""
+    wallet_line = ("\nBounty claim by: " + wallet + "\n") if wallet else ""
+    return (
+        "From "
+        + head_sha
+        + " Mon Sep 17 00:00:00 2001\n"
+        + "From: Contributor <dev@example.com>\n"
+        + "Subject: [PATCH] "
+        + subject
+        + "\n"
+        + wallet_line
+        + "\ndiff --git a/x.py b/x.py\n"
+        + diff
+        + "\n"
     )
 
 
 # ---------------------------------------------------------------------------
-# Happy paths — with wallet binding
+# Happy paths — wallet appears in the SHA-pinned commit patch
 # ---------------------------------------------------------------------------
 
 
@@ -89,11 +118,14 @@ def test_high_quality_pr_full_payout(sponsor, contributor):
             "reason": "Addresses root cause, tests added.",
         },
         web_pages={
-            ".*issues.*": "Bug: null pointer in login flow when email empty.",
-            ".*pull.*": _bound_pr_page(
-                claimer, "PR: Guard against empty email + regression test."
+            r".*/issues/.*": "Bug: null pointer in login flow when email empty.",
+            r".*/pull/.*": _pr_patch(HEAD_SHA, subject="Guard against empty email"),
+            r".*/commit/.*": _commit_patch(
+                HEAD_SHA,
+                wallet=claimer,
+                subject="Guard against empty email + regression test",
+                diff="+ if not email: return 400\n+ # tests added",
             ),
-            ".*\\.diff": "diff --git a/login.py b/login.py\n@@ +if not email: return 400\n",
         },
     )
 
@@ -105,6 +137,7 @@ def test_high_quality_pr_full_payout(sponsor, contributor):
     assert record["status"] == "PAID_FULL"
     assert record["quality"] == "HIGH"
     assert record["wallet_bound"] is True
+    assert record["head_sha"].lower() == HEAD_SHA.lower()
     assert int(record["payout"]) == BOUNTY_AMOUNT
     assert int(record["refund"]) == 0
 
@@ -120,9 +153,11 @@ def test_mid_quality_partial_payout(sponsor, contributor):
             "reason": "Minimal workaround, no tests.",
         },
         web_pages={
-            ".*issues.*": "Bug: crash on empty input",
-            ".*pull.*": _bound_pr_page(claimer, "PR: quick nil check"),
-            ".*\\.diff": "diff --git a/x.py\n+if not x: return\n",
+            r".*/issues/.*": "Bug: crash on empty input",
+            r".*/pull/.*": _pr_patch(HEAD_SHA, subject="quick nil check"),
+            r".*/commit/.*": _commit_patch(
+                HEAD_SHA, wallet=claimer, subject="quick nil check"
+            ),
         },
     )
 
@@ -149,9 +184,11 @@ def test_low_quality_full_refund(sponsor, contributor):
             "reason": "PR only edits README.",
         },
         web_pages={
-            ".*issues.*": "Bug: SQL injection in login",
-            ".*pull.*": _bound_pr_page(claimer, "PR: fix typo in README"),
-            ".*\\.diff": "diff --git a/README.md\n-old\n+new\n",
+            r".*/issues/.*": "Bug: SQL injection in login",
+            r".*/pull/.*": _pr_patch(HEAD_SHA, subject="fix typo in README"),
+            r".*/commit/.*": _commit_patch(
+                HEAD_SHA, wallet=claimer, subject="fix typo in README"
+            ),
         },
     )
 
@@ -204,7 +241,7 @@ def test_cancel_open_bounty_refunds_sponsor(sponsor):
 
 
 # ---------------------------------------------------------------------------
-# Judge feedback: security guards
+# Judge feedback — same-repo requirement
 # ---------------------------------------------------------------------------
 
 
@@ -217,40 +254,47 @@ def test_cross_repo_claim_rejected(sponsor, contributor):
         contract.connect(contributor).submit_claim(
             args=["1", CROSS_REPO_PR_URL]
         ).transact()
-    # Bounty must remain OPEN — a rejected claim cannot lock it.
     record = json.loads(contract.get_bounty(args=["1"]).call())
     assert record["status"] == "OPEN"
 
 
+# ---------------------------------------------------------------------------
+# Judge feedback — wallet binding must come from contributor-controlled,
+# SHA-pinned content, not from the rendered PR page.
+# ---------------------------------------------------------------------------
+
+
 def test_copied_pr_cannot_steal_bounty(sponsor, contributor):
-    """Attacker copies someone else's PR URL and files a claim with their own
-    wallet. The PR body does NOT contain the attacker's address, so adjudication
-    must refund the sponsor 100% and yield zero payout."""
+    """Attacker copies a legit contributor's PR URL and submits a claim from
+    their own wallet. The SHA-pinned commit patch does NOT contain the
+    attacker's address (the commit was authored by the real contributor with
+    their own wallet in the commit message), so adjudication must refund the
+    sponsor 100% and yield zero payout — even if the LLM would rate the PR
+    HIGH quality."""
     contract = _deploy()
+    other_wallet = "0xDEADBEEFCAFE1234567890ABCDEFDEADBEEF1111"
     _install_mocks(
         contract.client,
         llm_response={
-            # Even if the LLM would rate the PR HIGH quality, the wallet-binding
-            # guard must veto payout because the identity is not bound.
             "fixes_issue": True,
             "quality": "HIGH",
             "reason": "Great fix, well tested.",
         },
         web_pages={
-            ".*issues.*": "Bug: SQL injection in login",
-            # PR page belongs to a legitimate contributor — no attacker address.
-            ".*pull.*": (
-                "PR: Parameterize SQL queries in login handler.\n"
-                "Bounty claim by: 0xDEADBEEFCAFE1234567890ABCDEFDEADBEEF1111\n"
-                "Adds regression tests."
+            r".*/issues/.*": "Bug: SQL injection in login",
+            r".*/pull/.*": _pr_patch(HEAD_SHA, subject="Parameterize SQL queries"),
+            # Immutable commit patch is authored by the real contributor.
+            # The attacker's wallet is nowhere inside it.
+            r".*/commit/.*": _commit_patch(
+                HEAD_SHA,
+                wallet=other_wallet,
+                subject="Parameterize SQL queries in login handler",
+                diff="+ cursor.execute(sql, params)",
             ),
-            ".*\\.diff": "diff --git a/auth.py\n+cursor.execute(sql, params)\n",
         },
     )
 
     contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
-    # The attacker (contributor fixture) copies the URL — their address is NOT
-    # inside the PR body above.
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
     contract.connect(contributor).adjudicate(args=["1"]).transact()
 
@@ -262,9 +306,8 @@ def test_copied_pr_cannot_steal_bounty(sponsor, contributor):
 
 
 def test_copied_pr_cannot_lock_bounty(sponsor, contributor):
-    """Same attack as above — the bounty must also NOT be permanently locked.
-    After adjudication rejects the copied PR, the sponsor must have their GEN
-    back and total_locked must reflect that."""
+    """Same attack: the bounty must also NOT be permanently locked. After
+    adjudication rejects the copied PR, total_locked must reflect the refund."""
     contract = _deploy()
     _install_mocks(
         contract.client,
@@ -274,9 +317,10 @@ def test_copied_pr_cannot_lock_bounty(sponsor, contributor):
             "reason": "Reasonable fix.",
         },
         web_pages={
-            ".*issues.*": "Bug",
-            ".*pull.*": "Legitimate PR body, no attacker wallet.",
-            ".*\\.diff": "diff --git a/x.py\n+fix\n",
+            r".*/issues/.*": "Bug",
+            r".*/pull/.*": _pr_patch(HEAD_SHA),
+            # Immutable commit patch has no wallet reference at all.
+            r".*/commit/.*": _commit_patch(HEAD_SHA, wallet=None, subject="Fix bug"),
         },
     )
 
@@ -291,9 +335,59 @@ def test_copied_pr_cannot_lock_bounty(sponsor, contributor):
     assert int(contract.get_total_locked().call()) == 0
 
 
-def test_adjudication_reverts_when_diff_missing(sponsor, contributor):
-    """The immutable .diff is one of three required evidence pieces. If it
-    cannot be retrieved, adjudicate must revert (not silently settle on partial
+def test_wallet_only_in_pr_page_is_ignored(sponsor, contributor):
+    """v0.3.0 previous review finding: the wallet appearing anywhere in the
+    rendered PR page (e.g., in a comment planted by an attacker) is NOT
+    sufficient. Only the SHA-pinned commit patch counts.
+
+    Simulate that: the PR-level format-patch body contains the claimer's
+    wallet (as would appear on the rendered PR page — a PR description or a
+    third-party comment), but the immutable per-commit patch does not. The
+    contract must reject regardless."""
+    contract = _deploy()
+    claimer = _addr_str(contributor)
+    _install_mocks(
+        contract.client,
+        llm_response={
+            "fixes_issue": True,
+            "quality": "HIGH",
+            "reason": "Well done.",
+        },
+        web_pages={
+            r".*/issues/.*": "Bug",
+            # Mutable PR-level content mentions the claimer wallet, mimicking
+            # a comment or PR-body reference. The contract must NOT trust
+            # this for wallet binding.
+            r".*/pull/.*": (
+                _pr_patch(HEAD_SHA)
+                + "\n\n[COMMENT] claimant says: bounty for "
+                + claimer
+                + "\n"
+            ),
+            # Immutable commit patch does NOT contain the claimer wallet.
+            r".*/commit/.*": _commit_patch(HEAD_SHA, wallet=None),
+        },
+    )
+
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
+    contract.connect(contributor).adjudicate(args=["1"]).transact()
+
+    record = json.loads(contract.get_bounty(args=["1"]).call())
+    assert record["status"] == "REJECTED"
+    assert record["wallet_bound"] is False
+    assert int(record["payout"]) == 0
+    assert int(record["refund"]) == BOUNTY_AMOUNT
+
+
+# ---------------------------------------------------------------------------
+# Judge feedback — incomplete or mismatched evidence must not settle.
+# ---------------------------------------------------------------------------
+
+
+def test_adjudication_reverts_when_immutable_diff_missing(sponsor, contributor):
+    """The SHA-pinned commit patch is the immutable diff. If it cannot be
+    retrieved, adjudicate must revert (not silently settle on partial
     evidence). The bounty stays CLAIMED so it can be retried."""
     contract = _deploy()
     claimer = _addr_str(contributor)
@@ -305,16 +399,16 @@ def test_adjudication_reverts_when_diff_missing(sponsor, contributor):
             "reason": "unused — should never reach the LLM",
         },
         web_pages={
-            ".*issues.*": "Bug: something",
-            ".*pull.*": _bound_pr_page(claimer, "PR body"),
-            # Empty body simulates diff.github URL 404 / unreachable.
-            ".*\\.diff": "",
+            r".*/issues/.*": "Bug: something",
+            r".*/pull/.*": _pr_patch(HEAD_SHA),
+            # Empty body simulates commit .patch URL 404 / unreachable.
+            r".*/commit/.*": "",
         },
     )
 
     contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
-    with pytest.raises(Exception, match="diff"):
+    with pytest.raises(Exception, match="[Ii]mmutable"):
         contract.connect(contributor).adjudicate(args=["1"]).transact()
 
     record = json.loads(contract.get_bounty(args=["1"]).call())
@@ -330,9 +424,9 @@ def test_adjudication_reverts_when_issue_missing(sponsor, contributor):
         contract.client,
         llm_response={"fixes_issue": True, "quality": "HIGH", "reason": "n/a"},
         web_pages={
-            ".*issues.*": "",
-            ".*pull.*": _bound_pr_page(claimer, "PR body"),
-            ".*\\.diff": "diff content",
+            r".*/issues/.*": "",
+            r".*/pull/.*": _pr_patch(HEAD_SHA),
+            r".*/commit/.*": _commit_patch(HEAD_SHA, wallet=claimer),
         },
     )
 
@@ -345,21 +439,47 @@ def test_adjudication_reverts_when_issue_missing(sponsor, contributor):
     assert record["status"] == "CLAIMED"
 
 
-def test_adjudication_reverts_when_pr_page_missing(sponsor, contributor):
+def test_adjudication_reverts_when_pr_patch_missing(sponsor, contributor):
     contract = _deploy()
+    claimer = _addr_str(contributor)
     _install_mocks(
         contract.client,
         llm_response={"fixes_issue": True, "quality": "HIGH", "reason": "n/a"},
         web_pages={
-            ".*issues.*": "Bug",
-            ".*pull.*": "",
-            ".*\\.diff": "diff content",
+            r".*/issues/.*": "Bug",
+            r".*/pull/.*": "",
+            r".*/commit/.*": _commit_patch(HEAD_SHA, wallet=claimer),
         },
     )
 
     contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
-    with pytest.raises(Exception, match="PR"):
+    with pytest.raises(Exception, match="PR patch"):
+        contract.connect(contributor).adjudicate(args=["1"]).transact()
+
+    record = json.loads(contract.get_bounty(args=["1"]).call())
+    assert record["status"] == "CLAIMED"
+
+
+def test_adjudication_reverts_when_no_sha_in_pr_patch(sponsor, contributor):
+    """If the PR patch doesn't contain a parseable commit SHA, there is no
+    immutable pin — adjudication must revert."""
+    contract = _deploy()
+    claimer = _addr_str(contributor)
+    _install_mocks(
+        contract.client,
+        llm_response={"fixes_issue": True, "quality": "HIGH", "reason": "n/a"},
+        web_pages={
+            r".*/issues/.*": "Bug",
+            # PR patch body without any 40-char hex SHA.
+            r".*/pull/.*": "This is not a valid git format-patch payload.",
+            r".*/commit/.*": _commit_patch(HEAD_SHA, wallet=claimer),
+        },
+    )
+
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
+    with pytest.raises(Exception, match="[Ss]ha|SHA|pin"):
         contract.connect(contributor).adjudicate(args=["1"]).transact()
 
     record = json.loads(contract.get_bounty(args=["1"]).call())

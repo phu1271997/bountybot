@@ -208,6 +208,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .wallet-bind code { color: var(--accent); }
 .ghost-btn { background: transparent; color: var(--muted); border: 1px solid var(--border-strong); padding: 4px 10px; border-radius: 4px; font-family: var(--mono); font-size: 11px; cursor: pointer; }
 .ghost-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); box-shadow: none; }
+.cmd-block { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font-family: var(--mono); font-size: 12px; color: var(--text); white-space: pre-wrap; word-break: break-all; margin: 8px 0 0; overflow-x: auto; }
 .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--muted); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin-left: 8px; vertical-align: middle; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

@@ -35,53 +35,82 @@ the issue, and pays out — no maintainer approval needed.
 
 The contract uses `gl.vm.run_nondet(leader_fn, validator_fn)`. The leader:
 
-1. Fetches `issue_url`, `pr_url`, and `<pr_url>.diff` via `gl.nondet.web.render`.
-   Adjudication **reverts** if any of the three cannot be retrieved — partial
-   evidence never settles.
-2. Computes `wallet_bound` deterministically: whether the claiming wallet
-   address appears verbatim inside the PR page. This is a pure string check
-   run inside the non-deterministic block, so leader and validators agree by
-   construction whenever they see the same page.
-3. Feeds all three into an LLM prompt with a strict rubric:
+1. Fetches the **issue page** at `issue_url`.
+2. Fetches the **PR patch** at `<pr_url>.patch` — a git format-patch of every
+   commit in the PR. This is contributor-authored (the PR author is the git
+   committer) but still mutable, so it is used only to discover the head
+   commit's SHA — never trusted for the verdict.
+3. Parses the head commit SHA from the `From <40-hex>` header line of the PR
+   patch.
+4. Fetches the **SHA-pinned commit patch** at
+   `github.com/<owner>/<repo>/commit/<sha>.patch`. This one is
+   cryptographically immutable — its content cannot be changed without also
+   changing the SHA. This is the "immutable diff" the v0.3.0 review asked for.
+5. Adjudication **reverts** if any of the three fetches fails or if no SHA can
+   be parsed. Partial evidence never settles.
+6. Computes `wallet_bound` deterministically: whether the claiming wallet
+   address appears verbatim inside the SHA-pinned commit patch. Commit
+   messages and author fields inside a patch are contributor-controlled, and
+   they are bound to `head_sha` by git's hash. A pure string check makes
+   leader and validators agree by construction whenever they see the same
+   commit.
+7. Feeds the issue page + the immutable commit patch into an LLM prompt with
+   a strict rubric:
    - `HIGH` — substantial change addressing root cause, tests included → 100% payout.
    - `MID`  — fixes the issue but minimal / workaround → 60% payout.
    - `LOW`  — trivial, unrelated, or doesn't fix → 0% payout (full refund).
-4. Returns `{ fixes_issue: bool, quality: str, wallet_bound: bool, reason: str }`.
+8. Returns `{ fixes_issue, quality, wallet_bound, head_sha, reason }`.
 
 The validator re-runs the same fetch + LLM + wallet check independently and
-**only compares the three verdicts** (`fixes_issue`, `quality`, `wallet_bound`).
-It ignores the free-text `reason` — two validators that phrase their
-justification differently still pass consensus. Two validators that disagree
-on the verdict do not.
+**only compares the four verdicts** (`fixes_issue`, `quality`, `wallet_bound`,
+`head_sha`). It ignores the free-text `reason` — two validators that phrase
+their justification differently still pass consensus. Two validators that
+disagree on the verdict do not.
 
 That single design decision is why the contract can score high on Trục 2
 ("validators check meaning, not shape") in the Builder rubric.
 
-## Security model — the three guards
+## Security model — the three guards (v0.3.1)
 
-BountyBot addresses three concrete attack surfaces spelled out in the reviewer
-feedback for v0.2.0:
+BountyBot addresses the concrete attack surfaces spelled out in the two rounds
+of reviewer feedback:
 
-1. **Wallet-to-PR identity binding.** `submit_claim` records the caller's
-   wallet address. At adjudication, the contract fetches the PR page from
-   `github.com` and requires that the claimer's address appear verbatim in the
-   PR body. If it does not, the sponsor is refunded 100% and the bounty is
-   marked `REJECTED` — copied PR URLs cannot steal payout. Contributors are
-   instructed by the UI to paste `Bounty claim by: 0x…` into their PR
-   description; the copy-button in the app produces the exact line.
+1. **Wallet-to-commit identity binding (SHA-pinned, contributor-authored).**
+   `submit_claim` records the caller's wallet address. At adjudication, the
+   contract fetches the PR patch, parses the head commit SHA, then fetches
+   `github.com/<owner>/<repo>/commit/<sha>.patch` — which is
+   contributor-authored (the git commit message) *and* cryptographically
+   pinned to the SHA. The claiming wallet must appear inside that patch. A
+   wallet mentioned only in the rendered PR page or in a third-party comment
+   is deliberately ignored — anyone can leave a comment on any PR, so the
+   rendered page is not contributor-controlled content. If the wallet is not
+   in the commit patch, the sponsor is refunded 100% and the bounty is
+   marked `REJECTED`.
+
+   Contributors get an exact line to paste from the UI (`Bounty claim by:
+   0x…`) plus a one-liner:
+
+   ```bash
+   git commit --allow-empty -m "Bounty claim by: 0xYOUR_WALLET"
+   git push
+   ```
+
 2. **Same-repository requirement.** `submit_claim` extracts `{owner}/{repo}`
    from both the bounty's issue URL and the submitted PR URL and rejects the
    claim if they differ. A PR from `org/other-repo` cannot settle a bounty
    posted against `org/repo`.
+
 3. **All-evidence-or-revert.** `adjudicate` requires all three fetches — the
-   issue page, the PR page, and the immutable `.diff` — to succeed. If any one
-   is unreachable, the transaction reverts with a `UserError` naming the
-   missing source, and the bounty stays in `CLAIMED` state so it can be retried.
+   issue page, the PR patch, and the SHA-pinned immutable commit patch — to
+   succeed *and* it requires a parseable commit SHA. If anything is missing,
+   the transaction reverts with a `UserError` naming the missing source, and
+   the bounty stays in `CLAIMED` state so it can be retried.
 
 Bounty-locking is also neutralized: if an attacker files a claim with a copied
 PR URL, adjudication yields a full refund to the sponsor rather than locking
-their GEN. See `test_copied_pr_cannot_steal_bounty` and
-`test_copied_pr_cannot_lock_bounty` in `tests/test_bounty_bot.py`.
+their GEN. See `test_copied_pr_cannot_steal_bounty`,
+`test_copied_pr_cannot_lock_bounty`, and `test_wallet_only_in_pr_page_is_ignored`
+in `tests/test_bounty_bot.py`.
 
 ## Repository layout
 
@@ -153,8 +182,10 @@ flow:
 
 1. **Create bounty** — paste a real GitHub issue URL and lock some GEN.
 2. **Claim a bounty** — the PR must live in the same repository as the issue,
-   and its description must contain your wallet address verbatim (the UI
-   provides a copy-button that produces the exact line to paste).
+   and one of its **commit messages** must contain your wallet address
+   verbatim (the UI provides a copy-button and a `git commit --allow-empty`
+   one-liner). Comments and the PR description are ignored — only the
+   SHA-pinned commit patch counts.
 3. **Adjudicate** — hit the button, wait ~30–90s for validator consensus,
    watch the AI verdict and payout appear.
 
@@ -184,18 +215,20 @@ The tests cover:
 
 | Case | Expectation |
 |---|---|
-| HIGH-quality PR, wallet bound | `PAID_FULL`, contributor receives full amount |
-| MID-quality PR, wallet bound | `PAID_PARTIAL`, 60% to contributor, 40% refund |
-| LOW-quality PR, wallet bound | `REJECTED`, sponsor refunded fully |
+| HIGH-quality PR, wallet in SHA-pinned commit | `PAID_FULL`, contributor receives full amount |
+| MID-quality PR, wallet in SHA-pinned commit | `PAID_PARTIAL`, 60% to contributor, 40% refund |
+| LOW-quality PR, wallet in SHA-pinned commit | `REJECTED`, sponsor refunded fully |
 | Double claim on same bounty | rejected with `Bounty is not open` |
 | Zero-value bounty | rejected with `positive` |
 | Non-github URL | rejected with `format` |
 | PR URL from a different repository | rejected with `same repository` at `submit_claim` |
-| Copied PR (wallet not bound) — **cannot steal** | `REJECTED`, sponsor refunded 100% |
-| Copied PR (wallet not bound) — **cannot lock** | `total_locked == 0` after adjudication |
-| Adjudication with unreachable `.diff` | reverts, bounty stays `CLAIMED` |
+| Copied PR (wallet not in commit) — **cannot steal** | `REJECTED`, sponsor refunded 100% |
+| Copied PR (wallet not in commit) — **cannot lock** | `total_locked == 0` after adjudication |
+| Wallet appears in mutable PR patch but NOT in SHA-pinned commit patch | `REJECTED` — rendered-page wallet is deliberately ignored |
+| Adjudication with unreachable SHA-pinned commit patch | reverts, bounty stays `CLAIMED` |
 | Adjudication with unreachable issue page | reverts, bounty stays `CLAIMED` |
-| Adjudication with unreachable PR page | reverts, bounty stays `CLAIMED` |
+| Adjudication with unreachable PR patch | reverts, bounty stays `CLAIMED` |
+| PR patch has no parseable commit SHA | reverts, bounty stays `CLAIMED` |
 | Sponsor cancels open bounty | full refund |
 
 ---

@@ -231,8 +231,11 @@ export default function AppView() {
           <ol style={{ margin: '6px 0 0 18px', padding: 0 }}>
             <li>Your PR must live in the <em>same repository</em> as the issue.</li>
             <li>
-              Paste this <em>exact line</em> into your PR description so validators can
-              bind the claim to your wallet:
+              Put this <em>exact line</em> in a <strong>commit message</strong> of
+              your PR (not just the PR description). The contract binds the claim
+              to the wallet address found inside the SHA-pinned commit
+              <code> .patch</code>, so a comment on the rendered PR page — which
+              anyone can leave — is ignored on purpose:
               <div className="wallet-bind">
                 {account ? (
                   <>
@@ -249,6 +252,15 @@ export default function AppView() {
                   <em>Connect your wallet to see the exact line to paste.</em>
                 )}
               </div>
+              <details style={{ marginTop: 8 }}>
+                <summary style={{ cursor: 'pointer', color: 'var(--muted)' }}>
+                  Easiest way — add a bounty-claim commit
+                </summary>
+                <pre className="cmd-block">
+{`git commit --allow-empty -m "Bounty claim by: ${account || '0xYOUR_WALLET'}"
+git push`}
+                </pre>
+              </details>
             </li>
           </ol>
         </div>
@@ -269,12 +281,15 @@ export default function AppView() {
         <h3>3 · Adjudicate</h3>
         <p style={{ color: 'var(--muted)', fontSize: 13, marginTop: 0 }}>
           Anyone can trigger AI adjudication once a claim is on-chain. Validator LLMs fetch
-          the issue page, the PR page, <em>and</em> the immutable <code>.diff</code> — if
-          any of the three is unreachable, the transaction reverts (partial evidence never
-          settles). Validators also verify that the claiming wallet address appears
-          verbatim inside the PR body; if it doesn't, the sponsor is refunded 100% and no
-          payout is made. This transaction takes 30–120 seconds because validators do real
-          inference before consensus finalizes.
+          three sources: the issue page, the PR <code>.patch</code>, and — pinned by the
+          head commit SHA parsed from that patch — the immutable
+          <code> commit/&lt;sha&gt;.patch</code>. If any of the three is unreachable, or
+          no commit SHA can be parsed, the transaction reverts (partial evidence never
+          settles). Validators then verify that the claiming wallet address appears inside
+          the SHA-pinned commit patch — contributor-authored, cryptographically immutable
+          content. If it doesn&apos;t, the sponsor is refunded 100% and no payout is made.
+          This transaction takes 30–120 seconds because validators do real inference before
+          consensus finalizes.
         </p>
         <label>Bounty ID</label>
         <input value={adjBid} onChange={(e) => setAdjBid(e.target.value)} placeholder="1" />
@@ -328,7 +343,19 @@ export default function AppView() {
                 payout: {formatGen(b.payout)} GEN · refund: {formatGen(b.refund)} GEN
                 {b.wallet_bound === false && (
                   <span style={{ marginLeft: 10, color: 'var(--bad)' }}>
-                    · identity NOT bound to PR
+                    · identity NOT bound to commit
+                  </span>
+                )}
+                {b.head_sha && b.pr_url && (
+                  <span style={{ marginLeft: 10 }}>
+                    · pinned SHA:{' '}
+                    <a
+                      href={b.pr_url.replace(/\/pull\/\d+\/?$/, `/commit/${b.head_sha}`)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {b.head_sha.slice(0, 7)}
+                    </a>
                   </span>
                 )}
               </div>
