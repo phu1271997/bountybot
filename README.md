@@ -3,7 +3,7 @@
 **Trustless GitHub bounties, adjudicated by AI validator consensus on GenLayer studionet.**
 
 - **Live app:** <https://bountybot-genlayer.vercel.app>
-- **Contract:** [`0x4dbd36B9251CA545604A781fe708E8A18F239eB3`](https://genlayer-explorer.vercel.app/address/0x4dbd36B9251CA545604A781fe708E8A18F239eB3) on GenLayer studionet
+- **Contract:** [`0x8c8038B4368138e28f196c92A08a43b9Cb85f9Dd`](https://genlayer-explorer.vercel.app/address/0x8c8038B4368138e28f196c92A08a43b9Cb85f9Dd) on GenLayer studionet
 - **Repo:** <https://github.com/phu1271997/bountybot>
 
 Sponsors lock GEN against a public GitHub issue. Contributors claim a bounty by
@@ -257,7 +257,7 @@ The tests cover:
 ## Deployed contract
 
 - **Network:** GenLayer studionet (chainId `61999`)
-- **Contract address:** [`0x4dbd36B9251CA545604A781fe708E8A18F239eB3`](https://genlayer-explorer.vercel.app/address/0x4dbd36B9251CA545604A781fe708E8A18F239eB3)
+- **Contract address:** [`0x8c8038B4368138e28f196c92A08a43b9Cb85f9Dd`](https://genlayer-explorer.vercel.app/address/0x8c8038B4368138e28f196c92A08a43b9Cb85f9Dd)
 
 ---
 
