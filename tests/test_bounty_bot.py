@@ -129,7 +129,7 @@ def test_high_quality_pr_full_payout(sponsor, contributor):
         },
     )
 
-    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
     contract.connect(contributor).adjudicate(args=["1"]).transact()
 
@@ -161,7 +161,7 @@ def test_mid_quality_partial_payout(sponsor, contributor):
         },
     )
 
-    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
     contract.connect(contributor).adjudicate(args=["1"]).transact()
 
@@ -192,7 +192,7 @@ def test_low_quality_full_refund(sponsor, contributor):
         },
     )
 
-    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
     contract.connect(contributor).adjudicate(args=["1"]).transact()
 
@@ -211,7 +211,7 @@ def test_low_quality_full_refund(sponsor, contributor):
 
 def test_double_claim_rejected(sponsor, contributor):
     contract = _deploy()
-    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
     with pytest.raises(Exception, match="not open"):
         contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
@@ -220,7 +220,7 @@ def test_double_claim_rejected(sponsor, contributor):
 def test_zero_value_bounty_rejected(sponsor):
     contract = _deploy()
     with pytest.raises(Exception, match="positive"):
-        contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=0)
+        contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=0)
 
 
 def test_invalid_url_rejected(sponsor):
@@ -233,7 +233,7 @@ def test_invalid_url_rejected(sponsor):
 
 def test_cancel_open_bounty_refunds_sponsor(sponsor):
     contract = _deploy()
-    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
     contract.connect(sponsor).cancel_open_bounty(args=["1"]).transact()
     record = json.loads(contract.get_bounty(args=["1"]).call())
     assert record["status"] == "REJECTED"
@@ -249,13 +249,61 @@ def test_cross_repo_claim_rejected(sponsor, contributor):
     """PR URL from a repository other than the bounty's issue must be rejected
     at submit_claim, before any adjudication side effects can run."""
     contract = _deploy()
-    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
     with pytest.raises(Exception, match="same repository"):
         contract.connect(contributor).submit_claim(
             args=["1", CROSS_REPO_PR_URL]
         ).transact()
     record = json.loads(contract.get_bounty(args=["1"]).call())
     assert record["status"] == "OPEN"
+
+
+# ---------------------------------------------------------------------------
+# Direct-assignment feature (v0.3.2)
+# ---------------------------------------------------------------------------
+
+
+def test_assigned_bounty_rejects_wrong_wallet(sponsor, contributor):
+    """When the sponsor pins an assignee at create-time, any other wallet
+    that tries to submit_claim must be rejected before any adjudication
+    can run."""
+    contract = _deploy()
+    # Assign to a wallet the contributor fixture cannot possibly own.
+    other = "0xDEADBEEFCAFE1234567890ABCDEFDEADBEEF2222"
+    contract.connect(sponsor).create_bounty(
+        args=[ISSUE_URL, other]
+    ).transact(value=BOUNTY_AMOUNT)
+
+    with pytest.raises(Exception, match="assigned"):
+        contract.connect(contributor).submit_claim(
+            args=["1", PR_URL]
+        ).transact()
+
+    record = json.loads(contract.get_bounty(args=["1"]).call())
+    assert record["status"] == "OPEN"
+    assert record["assignee"].lower() == other.lower()
+
+
+def test_assigned_bounty_accepts_assignee(sponsor, contributor):
+    """The pinned assignee (and only that wallet) can submit a claim."""
+    contract = _deploy()
+    assignee_addr = _addr_str(contributor)
+    contract.connect(sponsor).create_bounty(
+        args=[ISSUE_URL, assignee_addr]
+    ).transact(value=BOUNTY_AMOUNT)
+    contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
+
+    record = json.loads(contract.get_bounty(args=["1"]).call())
+    assert record["status"] == "CLAIMED"
+    assert record["claimer"].lower() == assignee_addr.lower()
+
+
+def test_invalid_assignee_rejected(sponsor):
+    contract = _deploy()
+    with pytest.raises(Exception, match="[Aa]ssignee"):
+        contract.connect(sponsor).create_bounty(
+            args=[ISSUE_URL, "not-a-wallet"]
+        ).transact(value=BOUNTY_AMOUNT)
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +342,7 @@ def test_copied_pr_cannot_steal_bounty(sponsor, contributor):
         },
     )
 
-    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
     contract.connect(contributor).adjudicate(args=["1"]).transact()
 
@@ -324,7 +372,7 @@ def test_copied_pr_cannot_lock_bounty(sponsor, contributor):
         },
     )
 
-    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
     contract.connect(contributor).adjudicate(args=["1"]).transact()
 
@@ -369,7 +417,7 @@ def test_wallet_only_in_pr_page_is_ignored(sponsor, contributor):
         },
     )
 
-    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
     contract.connect(contributor).adjudicate(args=["1"]).transact()
 
@@ -406,7 +454,7 @@ def test_adjudication_reverts_when_immutable_diff_missing(sponsor, contributor):
         },
     )
 
-    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
     with pytest.raises(Exception, match="[Ii]mmutable"):
         contract.connect(contributor).adjudicate(args=["1"]).transact()
@@ -430,7 +478,7 @@ def test_adjudication_reverts_when_issue_missing(sponsor, contributor):
         },
     )
 
-    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
     with pytest.raises(Exception, match="Issue"):
         contract.connect(contributor).adjudicate(args=["1"]).transact()
@@ -452,7 +500,7 @@ def test_adjudication_reverts_when_pr_patch_missing(sponsor, contributor):
         },
     )
 
-    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
     with pytest.raises(Exception, match="PR patch"):
         contract.connect(contributor).adjudicate(args=["1"]).transact()
@@ -477,7 +525,7 @@ def test_adjudication_reverts_when_no_sha_in_pr_patch(sponsor, contributor):
         },
     )
 
-    contract.connect(sponsor).create_bounty(args=[ISSUE_URL]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
     contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
     with pytest.raises(Exception, match="[Ss]ha|SHA|pin"):
         contract.connect(contributor).adjudicate(args=["1"]).transact()

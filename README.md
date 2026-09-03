@@ -8,9 +8,18 @@
 
 Sponsors lock GEN against a public GitHub issue. Contributors claim a bounty by
 submitting a Pull Request. The GenLayer Intelligent Contract then reads the
-issue page, the PR page, and the raw PR diff **directly on-chain** (no oracle,
-no relayer), lets a set of validator LLMs judge whether the PR actually fixes
-the issue, and pays out — no maintainer approval needed.
+issue page, the PR patch, and — pinned to the head commit SHA — the immutable
+`commit/<sha>.patch` **directly on-chain** (no oracle, no relayer), lets a set
+of validator LLMs judge whether the PR actually fixes the issue, and pays out —
+no maintainer approval needed.
+
+**v0.3.2 adds:**
+- **Direct assignment** — sponsor can pin a bounty to a specific contributor
+  wallet at create-time, so nobody else can race in.
+- **Split UI** — separate routes for the dashboard (`/app`), posting
+  (`/create`), and each bounty (`/bounty/:id`) with a proper stage-flow view.
+- **Landing page** with problem statement, security model, comparison table,
+  use-cases, and FAQ.
 
 - **Track:** Agentic Economy + Future of Work
 - **Network:** GenLayer studionet only (`https://studio.genlayer.com`)
@@ -117,23 +126,35 @@ in `tests/test_bounty_bot.py`.
 ```
 BountyBot/
 ├── contracts/
-│   └── bounty_bot.py       # The Intelligent Contract
+│   └── bounty_bot.py             # The Intelligent Contract (v0.3.2)
 ├── tests/
 │   ├── conftest.py
-│   └── test_bounty_bot.py  # gltest suite (mocks LLM + web)
+│   └── test_bounty_bot.py        # gltest suite (mocks LLM + web)
 ├── frontend/
 │   ├── src/
-│   │   ├── App.jsx         # UI: create / claim / adjudicate + list
-│   │   ├── client.js       # genlayer-js + MetaMask chain switching
+│   │   ├── App.jsx               # router: /, /app, /create, /bounty/:id
+│   │   ├── client.js             # genlayer-js + MetaMask chain switching
 │   │   ├── main.jsx
-│   │   └── styles.css
+│   │   ├── styles.css
+│   │   ├── components/
+│   │   │   ├── TopNav.jsx
+│   │   │   ├── BountyCard.jsx
+│   │   │   └── Footer.jsx
+│   │   ├── hooks/
+│   │   │   ├── useWallet.js
+│   │   │   └── useBounties.js
+│   │   └── pages/
+│   │       ├── LandingPage.jsx   # /  — pitch, security, compare, FAQ
+│   │       ├── DashboardPage.jsx # /app — stats + filterable board
+│   │       ├── CreateBountyPage.jsx # /create — form w/ direct-assign
+│   │       └── BountyDetailPage.jsx # /bounty/:id — staged flow
 │   ├── index.html
 │   ├── package.json
 │   ├── vite.config.js
-│   └── .env.example        # copy → .env.local, paste deployed address
+│   └── .env.example              # paste deployed address here
 ├── scripts/
 │   └── deploy/
-│       └── DEPLOY.md       # step-by-step studionet deploy
+│       └── DEPLOY.md             # step-by-step studionet deploy
 └── README.md
 ```
 

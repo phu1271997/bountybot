@@ -113,11 +113,21 @@ class Contract(gl.Contract):
         return json.dumps({"items": out, "total": total})
 
     @gl.public.write.payable
-    def create_bounty(self, issue_url: str) -> None:
+    def create_bounty(self, issue_url: str, assignee: str) -> None:
         amount = int(gl.message.value)
         if amount <= 0:
             raise gl.vm.UserError("Bounty amount must be positive")
         issue_url = _validate_url(issue_url, GITHUB_ISSUE_RE, "issue")
+
+        # Optional direct-assignment: if `assignee` is a 0x address, only that
+        # wallet may submit_claim. Empty string keeps the bounty open to any
+        # contributor (default behavior).
+        assignee_norm = ""
+        if assignee:
+            candidate = assignee.strip()
+            if not re.match(r"^0x[0-9a-fA-F]{40}$", candidate):
+                raise gl.vm.UserError("Invalid assignee address")
+            assignee_norm = candidate.lower()
 
         new_id = int(self.bounty_count) + 1
         bounty_id = str(new_id)
@@ -126,6 +136,7 @@ class Contract(gl.Contract):
             "sponsor": _addr_str(gl.message.sender_address),
             "issue_url": issue_url,
             "amount": str(amount),
+            "assignee": assignee_norm,
             "pr_url": "",
             "claimer": "",
             "status": STATUS_OPEN,
@@ -158,8 +169,16 @@ class Contract(gl.Contract):
                 "Issue and PR must live in the same repository"
             )
 
+        # Direct-assignment gate: if the sponsor pinned an assignee at
+        # create-time, only that wallet may claim. Prevents anyone else from
+        # racing in on a pre-negotiated bounty.
+        claimer_addr = _addr_str(gl.message.sender_address)
+        assignee = record.get("assignee", "") or ""
+        if assignee and claimer_addr.lower() != assignee.lower():
+            raise gl.vm.UserError("Bounty is assigned to another wallet")
+
         record["pr_url"] = pr_url
-        record["claimer"] = _addr_str(gl.message.sender_address)
+        record["claimer"] = claimer_addr
         record["status"] = STATUS_CLAIMED
         self.bounties[bounty_id] = json.dumps(record, sort_keys=True)
 
