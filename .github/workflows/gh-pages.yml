@@ -31,7 +31,7 @@ jobs:
       - name: Build (base=/bountybot/)
         env:
           VITE_BASE: "/bountybot/"
-          VITE_CONTRACT_ADDRESS: "0xBfC1EeF51c234a44261fe677e178F222dAE5b120"
+          VITE_CONTRACT_ADDRESS: "0x357Ac139E45fA80e129Cde57B4d61D0846BfC371"
         run: npm run build
       - name: Add SPA 404 fallback
         run: cp dist/index.html dist/404.html
