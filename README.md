@@ -2,7 +2,7 @@
 
 **Trustless GitHub bounties, adjudicated by AI validator consensus on GenLayer studionet.**
 
-- **Live app:** <https://bountybot-genlayer.vercel.app> (primary) · <https://phu1271997.github.io/bountybot/> (GH Pages fallback)
+- **Live app:** <https://bountybot-gen.vercel.app> (primary) · <https://phu1271997.github.io/bountybot/> (GH Pages fallback)
 - **Contract:** [`0x8c8038B4368138e28f196c92A08a43b9Cb85f9Dd`](https://genlayer-explorer.vercel.app/address/0x8c8038B4368138e28f196c92A08a43b9Cb85f9Dd) on GenLayer studionet
 - **Repo:** <https://github.com/phu1271997/bountybot>
 
