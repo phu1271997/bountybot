@@ -274,3 +274,5 @@ The tests cover:
 - GenLayer docs: https://docs.genlayer.com
 - GenLayer SDK API: https://sdk.genlayer.com/main/_static/ai/api.txt
 - Storage rules: https://docs.genlayer.com/developers/intelligent-contracts/storage
+
+> Live smoke test — https://bountybot-app.vercel.app is a running demo on GenLayer studionet.
