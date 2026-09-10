@@ -3,6 +3,7 @@ import LandingPage from './pages/LandingPage.jsx';
 import DashboardPage from './pages/DashboardPage.jsx';
 import CreateBountyPage from './pages/CreateBountyPage.jsx';
 import BountyDetailPage from './pages/BountyDetailPage.jsx';
+import ExplorerPage from './pages/ExplorerPage.jsx';
 
 // Strip trailing slash so BrowserRouter treats '/bountybot/' as ''.
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
@@ -14,6 +15,8 @@ export default function App() {
         <Route path="/" element={<LandingPage />} />
         <Route path="/app" element={<DashboardPage />} />
         <Route path="/create" element={<CreateBountyPage />} />
+        <Route path="/explorer" element={<ExplorerPage />} />
+        <Route path="/history" element={<Navigate to="/explorer" replace />} />
         <Route path="/bounty/:id" element={<BountyDetailPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

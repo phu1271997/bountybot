@@ -13,6 +13,8 @@ import { useWallet } from '../hooks/useWallet.js';
 const EXPLORER_TX = 'https://genlayer-explorer.vercel.app/tx/';
 const EXPLORER_ADDR = 'https://genlayer-explorer.vercel.app/address/';
 const PR_RE = /^https:\/\/github\.com\/[A-Za-z0-9_.\-]+\/[A-Za-z0-9_.\-]+\/pull\/\d+\/?$/;
+// Must match CLAIM_TIMEOUT_SECONDS in contracts/bounty_bot.py.
+const CLAIM_TIMEOUT_SECONDS = 3 * 24 * 60 * 60;
 
 function short(v) {
   if (!v) return '';
@@ -71,7 +73,12 @@ export default function BountyDetailPage() {
   const isAssigned = record && record.assignee;
   const canClaim = record?.status === 'OPEN' && (!isAssigned || (account && account.toLowerCase() === record.assignee.toLowerCase()));
   const canAdjudicate = record?.status === 'CLAIMED';
-  const settled = record && ['PAID_FULL', 'PAID_PARTIAL', 'REJECTED'].includes(record.status);
+  const settled = record && ['PAID_FULL', 'PAID_PARTIAL', 'REJECTED', 'EXPIRED'].includes(record.status);
+  const claimedAt = Number(record?.claimed_at || 0);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const windowElapsed = claimedAt > 0 && nowSec - claimedAt >= CLAIM_TIMEOUT_SECONDS;
+  const reclaimableInHrs =
+    claimedAt > 0 ? Math.max(0, Math.ceil((claimedAt + CLAIM_TIMEOUT_SECONDS - nowSec) / 3600)) : null;
   const prValid = PR_RE.test(prUrl.trim());
   const walletLine = account ? `Bounty claim by: ${account}` : '';
 
@@ -122,6 +129,16 @@ export default function BountyDetailPage() {
       writeClient.writeContract({
         address: CONTRACT_ADDRESS,
         functionName: 'cancel_open_bounty',
+        args: [String(id)],
+        value: 0n,
+      }),
+    );
+
+  const reclaim = () =>
+    withTx('Reclaiming expired escrow to sponsor…', () =>
+      writeClient.writeContract({
+        address: CONTRACT_ADDRESS,
+        functionName: 'reclaim_expired_claim',
         args: [String(id)],
         value: 0n,
       }),
@@ -372,8 +389,13 @@ git push`}
             {canAdjudicate ? (
               <div>
                 <p className="muted">
-                  Fetch issue + PR patch + SHA-pinned commit patch on-chain, run validator
-                  LLM vote, settle payout. Takes 30–120 seconds.
+                  Fetch issue + the full PR patch + the SHA-pinned commit patch on-chain,
+                  run the validator LLM vote, settle payout. Takes 30–120 seconds.
+                </p>
+                <p className="form-hint">
+                  Only the claimer or the sponsor can adjudicate during the first 3 days of a
+                  claim — this stops an unrelated wallet from closing an in-progress claim.
+                  After that window anyone may settle it.
                 </p>
                 <button
                   className="btn btn-primary"
@@ -382,6 +404,30 @@ git push`}
                 >
                   run validator consensus
                 </button>
+
+                {isSponsor && (
+                  <div className="notice notice--warn" style={{ marginTop: 14 }}>
+                    <strong>Sponsor recovery.</strong>{' '}
+                    {windowElapsed ? (
+                      <>The claim window has elapsed and this claim never settled. You can
+                      recover the full escrow.</>
+                    ) : (
+                      <>If this claim never settles, you can reclaim the full escrow once the
+                      3-day window elapses{reclaimableInHrs != null && reclaimableInHrs > 0
+                        ? ` (~${reclaimableInHrs}h left)`
+                        : ''}.</>
+                    )}
+                    <div style={{ marginTop: 10 }}>
+                      <button
+                        className="btn btn-ghost btn-small"
+                        onClick={reclaim}
+                        disabled={!account || !!busy || !windowElapsed}
+                      >
+                        reclaim escrow
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             ) : settled ? (
               <p className="muted">

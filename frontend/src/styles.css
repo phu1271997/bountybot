@@ -658,3 +658,23 @@ th.compare__ours { color: var(--accent); }
   .detail-hero__amount { text-align: left; align-items: flex-start; }
   .page__hero { flex-direction: column; align-items: flex-start; }
 }
+
+/* ---- v0.4.0: EXPIRED status + case explorer table ---- */
+.pill--EXPIRED { background: #33291a; color: var(--warn); }
+
+.table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.explorer-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; min-width: 820px; }
+.explorer-table thead th {
+  text-align: left; padding: 12px 14px; color: var(--muted-strong);
+  font-weight: 600; font-size: 0.74rem; letter-spacing: 0.04em; text-transform: uppercase;
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.explorer-table td { padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.explorer-table tbody tr:last-child td { border-bottom: none; }
+.explorer-table tbody tr:hover { background: var(--panel-2); }
+.explorer-table .num { text-align: right; font-family: var(--mono); white-space: nowrap; }
+.explorer-table .pill { margin-right: 6px; }
+.explorer-table .reason-cell {
+  max-width: 320px; color: var(--muted-strong);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}

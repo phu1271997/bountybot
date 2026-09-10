@@ -12,3 +12,9 @@ def sponsor():
 @pytest.fixture
 def contributor():
     return create_account()
+
+
+@pytest.fixture
+def stranger():
+    """An unrelated wallet — neither sponsor nor claimer."""
+    return create_account()

@@ -29,6 +29,7 @@ export default function Footer() {
           <ul>
             <li><Link to="/app">Dashboard</Link></li>
             <li><Link to="/create">Post a bounty</Link></li>
+            <li><Link to="/explorer">Case explorer</Link></li>
             <li><a href="#how">How it works</a></li>
             <li><a href="#security">Security model</a></li>
             <li><a href="#faq">FAQ</a></li>
@@ -68,7 +69,7 @@ export default function Footer() {
       </div>
       <p className="site-footer__copy">
         © 2026 · Submitted to the GenLayer Foundation Builders program. Not
-        financial advice. Testnet deployment; do not use with real assets.
+        financial advice. Deployed on GenLayer studionet; do not use with real assets.
       </p>
     </footer>
   );

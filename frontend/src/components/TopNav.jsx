@@ -19,7 +19,7 @@ export default function TopNav({ active }) {
         <Link to="/" className="brand">
           <span className="brand__glyph">◆</span>
           <span className="brand__name">bountybot</span>
-          <span className="brand__version">v0.3.2</span>
+          <span className="brand__version">v0.4.0</span>
         </Link>
         <nav className="topnav__links">
           <NavLink to="/app" end className={({ isActive }) => 'topnav__link' + (isActive || active === 'dashboard' ? ' is-active' : '')}>
@@ -27,6 +27,9 @@ export default function TopNav({ active }) {
           </NavLink>
           <NavLink to="/create" className={({ isActive }) => 'topnav__link' + (isActive || active === 'create' ? ' is-active' : '')}>
             new bounty
+          </NavLink>
+          <NavLink to="/explorer" className={({ isActive }) => 'topnav__link' + (isActive || active === 'explorer' ? ' is-active' : '')}>
+            explorer
           </NavLink>
           <a
             href={`https://genlayer-explorer.vercel.app/address/${CONTRACT_ADDRESS}`}

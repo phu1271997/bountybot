@@ -3,17 +3,31 @@
 **Trustless GitHub bounties, adjudicated by AI validator consensus on GenLayer studionet.**
 
 - **Live app:** <https://bountybot-gen.vercel.app> (primary) · <https://phu1271997.github.io/bountybot/> (GH Pages fallback)
-- **Contract:** [`0x357Ac139E45fA80e129Cde57B4d61D0846BfC371`](https://genlayer-explorer.vercel.app/address/0x357Ac139E45fA80e129Cde57B4d61D0846BfC371) on GenLayer studionet
+- **Contract:** [`0x3b5E1058d60fE6Ae7b50Dc84bf048679FEB6df99`](https://genlayer-explorer.vercel.app/address/0x3b5E1058d60fE6Ae7b50Dc84bf048679FEB6df99) on GenLayer studionet
 - **Repo:** <https://github.com/phu1271997/bountybot>
 
 Sponsors lock GEN against a public GitHub issue. Contributors claim a bounty by
 submitting a Pull Request. The GenLayer Intelligent Contract then reads the
-issue page, the PR patch, and — pinned to the head commit SHA — the immutable
-`commit/<sha>.patch` **directly on-chain** (no oracle, no relayer), lets a set
-of validator LLMs judge whether the PR actually fixes the issue, and pays out —
-no maintainer approval needed.
+issue page and the **full PR patch** (every commit) **directly on-chain** (no
+oracle, no relayer), pins the head commit SHA, binds the claiming wallet to the
+immutable `commit/<sha>.patch`, lets a set of validator LLMs judge whether the
+PR actually fixes the issue, and pays out — no maintainer approval needed.
 
-**v0.3.2 adds:**
+**v0.4.0 adds (round-3 review fixes):**
+- **Full-PR adjudication** — the LLM judges the entire cumulative PR diff, not
+  just the head commit. A documented empty "marker" commit can no longer make
+  adjudication inspect the wrong (empty) diff. Identity is still bound to the
+  immutable SHA-pinned commit patch.
+- **Authorized timeout recovery** — a claimed bounty can never be stranded. The
+  sponsor can reclaim the full escrow via `reclaim_expired_claim` once the
+  3-day claim window elapses (`get_claim_timeout` exposes it on-chain).
+- **No premature close** — during the claim window only the claimer or the
+  sponsor may trigger `adjudicate`; an unrelated wallet cannot force a verdict
+  on an in-progress claim. After the window, anyone may settle it.
+- **Case Explorer** — a read-only `/explorer` (alias `/history`) route that
+  surfaces every resolved case: verdict, quality tier, pinned SHA, and payout.
+
+**Earlier (v0.3.2):**
 - **Direct assignment** — sponsor can pin a bounty to a specific contributor
   wallet at create-time, so nobody else can race in.
 - **Split UI** — separate routes for the dashboard (`/app`), posting
@@ -42,29 +56,36 @@ no maintainer approval needed.
 
 ## Consensus design (what the validator checks)
 
-The contract uses `gl.vm.run_nondet(leader_fn, validator_fn)`. The leader:
+The contract runs consensus through `gl.vm.run_nondet_default` (the sandboxed
+variant — SDK v0.3.0 renamed the safe API, so we resolve it defensively). The
+leader:
 
 1. Fetches the **issue page** at `issue_url`.
-2. Fetches the **PR patch** at `<pr_url>.patch` — a git format-patch of every
-   commit in the PR. This is contributor-authored (the PR author is the git
-   committer) but still mutable, so it is used only to discover the head
-   commit's SHA — never trusted for the verdict.
-3. Parses the head commit SHA from the `From <40-hex>` header line of the PR
-   patch.
-4. Fetches the **SHA-pinned commit patch** at
-   `github.com/<owner>/<repo>/commit/<sha>.patch`. This one is
-   cryptographically immutable — its content cannot be changed without also
-   changing the SHA. This is the "immutable diff" the v0.3.0 review asked for.
+2. Fetches the **full PR patch** at `<pr_url>.patch` — a git format-patch of
+   *every* commit in the PR. This is the complete cumulative change and is what
+   the LLM judges. Judging only the head commit (as v0.3.x did) let a
+   contributor hide the real work behind an empty marker commit; judging the
+   whole patch closes that.
+3. Parses the head commit SHA from the last `From <40-hex>` header of the PR
+   patch and pins the verdict to it. A force-push mid-consensus changes the SHA,
+   so validators disagree and consensus fails safe (the sponsor can then recover
+   via `reclaim_expired_claim`).
+4. Fetches the **SHA-pinned head commit patch** at
+   `github.com/<owner>/<repo>/commit/<sha>.patch`. This one is cryptographically
+   immutable — its content cannot change without changing the SHA — and is used
+   to bind the claiming wallet (below).
 5. Adjudication **reverts** if any of the three fetches fails or if no SHA can
    be parsed. Partial evidence never settles.
 6. Computes `wallet_bound` deterministically: whether the claiming wallet
-   address appears verbatim inside the SHA-pinned commit patch. Commit
-   messages and author fields inside a patch are contributor-controlled, and
-   they are bound to `head_sha` by git's hash. A pure string check makes
-   leader and validators agree by construction whenever they see the same
-   commit.
-7. Feeds the issue page + the immutable commit patch into an LLM prompt with
-   a strict rubric:
+   address appears verbatim inside the SHA-pinned commit patch. Commit messages
+   and author fields inside a patch are contributor-controlled, and they are
+   bound to `head_sha` by git's hash. A pure string check makes leader and
+   validators agree by construction whenever they see the same commit. (The
+   documented claim workflow pushes an empty `Bounty claim by: 0x…` commit last,
+   so it lands here as the head commit — identity binds, while step 2 still sees
+   the real work.)
+7. Feeds the issue page + the **full PR patch** into an LLM prompt with a strict
+   rubric (empty/marker commits explicitly ignored):
    - `HIGH` — substantial change addressing root cause, tests included → 100% payout.
    - `MID`  — fixes the issue but minimal / workaround → 60% payout.
    - `LOW`  — trivial, unrelated, or doesn't fix → 0% payout (full refund).
@@ -79,9 +100,9 @@ disagree on the verdict do not.
 That single design decision is why the contract can score high on Trục 2
 ("validators check meaning, not shape") in the Builder rubric.
 
-## Security model — the three guards (v0.3.1)
+## Security model — the guards (v0.4.0)
 
-BountyBot addresses the concrete attack surfaces spelled out in the two rounds
+BountyBot addresses the concrete attack surfaces spelled out across three rounds
 of reviewer feedback:
 
 1. **Wallet-to-commit identity binding (SHA-pinned, contributor-authored).**
@@ -110,10 +131,28 @@ of reviewer feedback:
    posted against `org/repo`.
 
 3. **All-evidence-or-revert.** `adjudicate` requires all three fetches — the
-   issue page, the PR patch, and the SHA-pinned immutable commit patch — to
+   issue page, the full PR patch, and the SHA-pinned immutable commit patch — to
    succeed *and* it requires a parseable commit SHA. If anything is missing,
    the transaction reverts with a `UserError` naming the missing source, and
    the bounty stays in `CLAIMED` state so it can be retried.
+
+4. **Full-PR evaluation, not a single commit.** The LLM judges the entire
+   cumulative PR patch. An empty marker commit (or any single trivial commit)
+   can no longer make adjudication inspect the wrong diff. Identity binding
+   still uses the immutable SHA-pinned head commit patch. See
+   `test_empty_marker_head_commit_still_judges_full_pr`.
+
+5. **No stranded escrow — authorized timeout recovery.** A claimed bounty can
+   never be locked forever. `submit_claim` stamps `claimed_at`; after
+   `CLAIM_TIMEOUT_SECONDS` (3 days, readable via `get_claim_timeout`) the
+   **sponsor** — and only the sponsor — can call `reclaim_expired_claim` for a
+   full refund. See `test_reclaim_before_timeout_rejected`,
+   `test_reclaim_requires_sponsor`.
+
+6. **No premature close.** During the claim window only the claimer or the
+   sponsor may `adjudicate`; an unrelated wallet cannot force a verdict on an
+   in-progress claim. Once the window elapses, anyone may settle it, so a stale
+   claim never blocks the board. See `test_stranger_cannot_adjudicate_before_window`.
 
 Bounty-locking is also neutralized: if an attacker files a claim with a copied
 PR URL, adjudication yields a full refund to the sponsor rather than locking
@@ -126,13 +165,13 @@ in `tests/test_bounty_bot.py`.
 ```
 BountyBot/
 ├── contracts/
-│   └── bounty_bot.py             # The Intelligent Contract (v0.3.2)
+│   └── bounty_bot.py             # The Intelligent Contract (v0.4.0)
 ├── tests/
 │   ├── conftest.py
 │   └── test_bounty_bot.py        # gltest suite (mocks LLM + web)
 ├── frontend/
 │   ├── src/
-│   │   ├── App.jsx               # router: /, /app, /create, /bounty/:id
+│   │   ├── App.jsx               # router: /, /app, /create, /explorer, /bounty/:id
 │   │   ├── client.js             # genlayer-js + MetaMask chain switching
 │   │   ├── main.jsx
 │   │   ├── styles.css
@@ -147,12 +186,14 @@ BountyBot/
 │   │       ├── LandingPage.jsx   # /  — pitch, security, compare, FAQ
 │   │       ├── DashboardPage.jsx # /app — stats + filterable board
 │   │       ├── CreateBountyPage.jsx # /create — form w/ direct-assign
-│   │       └── BountyDetailPage.jsx # /bounty/:id — staged flow
+│   │       ├── ExplorerPage.jsx  # /explorer — resolved cases + payouts
+│   │       └── BountyDetailPage.jsx # /bounty/:id — staged flow + reclaim
 │   ├── index.html
 │   ├── package.json
 │   ├── vite.config.js
 │   └── .env.example              # paste deployed address here
 ├── scripts/
+│   ├── deploy.py                 # genlayer-py studionet deploy (reads env key)
 │   └── deploy/
 │       └── DEPLOY.md             # step-by-step studionet deploy
 └── README.md
@@ -179,7 +220,19 @@ panel and transfer GEN from one of the pre-funded studio accounts to your
 MetaMask address. **Do NOT use the testnet faucet — testnet and studionet are
 separate networks.**
 
-### 2. Deploy the contract via GenLayer Studio (recommended)
+### 2. Deploy the contract
+
+**Option A — scripted (genlayer-py):**
+
+```bash
+source ~/.genlayer/env.sh          # exports GENLAYER_PRIVATE_KEY (funded on studionet)
+python3 scripts/deploy.py --chain studionet
+```
+
+The script pre-checks the schema, deploys, waits for `FINALIZED`, and prints the
+contract address + explorer link.
+
+**Option B — GenLayer Studio (no CLI):**
 
 1. Open `https://studio.genlayer.com/contracts`.
 2. New contract → paste the contents of `contracts/bounty_bot.py`.
@@ -251,13 +304,19 @@ The tests cover:
 | Adjudication with unreachable PR patch | reverts, bounty stays `CLAIMED` |
 | PR patch has no parseable commit SHA | reverts, bounty stays `CLAIMED` |
 | Sponsor cancels open bounty | full refund |
+| Empty marker commit as PR head | judged from **full** PR patch → `PAID_FULL` (not an empty diff) |
+| Unrelated wallet adjudicates a fresh claim | rejected with `claim window` |
+| Sponsor reclaims before the timeout | rejected with `window has not elapsed` |
+| Non-sponsor calls `reclaim_expired_claim` | rejected with `Only the sponsor` |
+| `reclaim_expired_claim` on an open bounty | rejected with `claimed bounty` |
+| `submit_claim` stamps `claimed_at` | non-zero claim timestamp recorded |
 
 ---
 
 ## Deployed contract
 
 - **Network:** GenLayer studionet (chainId `61999`)
-- **Contract address:** [`0x357Ac139E45fA80e129Cde57B4d61D0846BfC371`](https://genlayer-explorer.vercel.app/address/0x357Ac139E45fA80e129Cde57B4d61D0846BfC371)
+- **Contract address:** [`0x3b5E1058d60fE6Ae7b50Dc84bf048679FEB6df99`](https://genlayer-explorer.vercel.app/address/0x3b5E1058d60fE6Ae7b50Dc84bf048679FEB6df99)
 
 ---
 

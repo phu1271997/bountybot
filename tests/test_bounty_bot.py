@@ -204,6 +204,45 @@ def test_low_quality_full_refund(sponsor, contributor):
     assert int(record["refund"]) == BOUNTY_AMOUNT
 
 
+def test_empty_marker_head_commit_still_judges_full_pr(sponsor, contributor):
+    """Reviewer finding: an empty 'Bounty claim by: 0x…' marker commit pushed
+    as the PR head must NOT make adjudication inspect an empty diff. The head
+    commit patch is the (empty) marker — it only binds the wallet — while the
+    full PR patch carries the real fix, which is what the LLM judges. The
+    bounty must settle (not revert) and pay out."""
+    contract = _deploy()
+    claimer = _addr_str(contributor)
+    # Head commit patch = the empty marker: wallet present, no code diff.
+    marker_commit = _commit_patch(HEAD_SHA, wallet=claimer, subject="Bounty claim marker", diff="")
+    # Full PR patch = real fix commits + the marker head.
+    full_pr = (
+        _pr_patch("1111111111111111111111111111111111111111", subject="Implement real fix")
+        + _pr_patch(HEAD_SHA, subject="Bounty claim by: " + claimer)
+    )
+    _install_mocks(
+        contract.client,
+        llm_response={
+            "fixes_issue": True,
+            "quality": "HIGH",
+            "reason": "Full PR implements the fix with tests; marker commit ignored.",
+        },
+        web_pages={
+            r".*/issues/.*": "Bug: needs a real fix",
+            r".*/pull/.*": full_pr,
+            r".*/commit/.*": marker_commit,
+        },
+    )
+
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
+    contract.connect(contributor).adjudicate(args=["1"]).transact()
+
+    record = json.loads(contract.get_bounty(args=["1"]).call())
+    assert record["status"] == "PAID_FULL"
+    assert record["wallet_bound"] is True
+    assert int(record["payout"]) == BOUNTY_AMOUNT
+
+
 # ---------------------------------------------------------------------------
 # Existing guards
 # ---------------------------------------------------------------------------
@@ -238,6 +277,67 @@ def test_cancel_open_bounty_refunds_sponsor(sponsor):
     record = json.loads(contract.get_bounty(args=["1"]).call())
     assert record["status"] == "REJECTED"
     assert int(record["refund"]) == BOUNTY_AMOUNT
+
+
+# ---------------------------------------------------------------------------
+# Judge feedback (round 3) — a claimed bounty can be neither stranded nor
+# prematurely closed by an unrelated wallet.
+# ---------------------------------------------------------------------------
+
+
+def test_claim_stamps_claimed_at(sponsor, contributor):
+    """submit_claim must stamp a non-zero claim time so the timeout math has
+    something to work with."""
+    contract = _deploy()
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
+    record = json.loads(contract.get_bounty(args=["1"]).call())
+    assert record["status"] == "CLAIMED"
+    assert int(record["claimed_at"]) > 0
+
+
+def test_stranger_cannot_adjudicate_before_window(sponsor, contributor, stranger):
+    """An unrelated wallet cannot force a verdict on a fresh claim — only the
+    claimer or sponsor may, until the claim window elapses. This blocks the
+    'any wallet can prematurely close an escrowed bounty' vector."""
+    contract = _deploy()
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
+    with pytest.raises(Exception, match="claim window"):
+        contract.connect(stranger).adjudicate(args=["1"]).transact()
+    record = json.loads(contract.get_bounty(args=["1"]).call())
+    assert record["status"] == "CLAIMED"
+
+
+def test_reclaim_before_timeout_rejected(sponsor, contributor):
+    """The sponsor cannot yank escrow out of a fresh claim — the claimant must
+    get the full window to be adjudicated first."""
+    contract = _deploy()
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
+    with pytest.raises(Exception, match="window has not elapsed"):
+        contract.connect(sponsor).reclaim_expired_claim(args=["1"]).transact()
+    record = json.loads(contract.get_bounty(args=["1"]).call())
+    assert record["status"] == "CLAIMED"
+    assert int(contract.get_total_locked().call()) == BOUNTY_AMOUNT
+
+
+def test_reclaim_requires_sponsor(sponsor, contributor, stranger):
+    """Only the sponsor (who funded the escrow) may recover it."""
+    contract = _deploy()
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
+    contract.connect(contributor).submit_claim(args=["1", PR_URL]).transact()
+    with pytest.raises(Exception, match="[Oo]nly the sponsor"):
+        contract.connect(stranger).reclaim_expired_claim(args=["1"]).transact()
+
+
+def test_reclaim_rejects_non_claimed(sponsor):
+    """An open (unclaimed) bounty is recovered via cancel_open_bounty, not the
+    claim-timeout path."""
+    contract = _deploy()
+    contract.connect(sponsor).create_bounty(args=[ISSUE_URL, ""]).transact(value=BOUNTY_AMOUNT)
+    with pytest.raises(Exception, match="claimed bounty"):
+        contract.connect(sponsor).reclaim_expired_claim(args=["1"]).transact()
 
 
 # ---------------------------------------------------------------------------

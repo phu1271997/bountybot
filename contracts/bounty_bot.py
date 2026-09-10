@@ -10,6 +10,7 @@ STATUS_CLAIMED = "CLAIMED"
 STATUS_PAID_FULL = "PAID_FULL"
 STATUS_PAID_PARTIAL = "PAID_PARTIAL"
 STATUS_REJECTED = "REJECTED"
+STATUS_EXPIRED = "EXPIRED"
 
 QUALITY_PAYOUT_BPS = {
     "HIGH": 10000,
@@ -19,6 +20,13 @@ QUALITY_PAYOUT_BPS = {
 
 MAX_URL = 300
 MAX_REASON = 700
+
+# How long a CLAIMED bounty may sit before its escrow can be recovered.
+# Until this elapses, only the claimer or the sponsor may trigger adjudication
+# (so an unrelated wallet cannot prematurely close an in-progress claim). Once
+# it elapses, the sponsor may reclaim the escrow and anyone may adjudicate.
+CLAIM_TIMEOUT_SECONDS = 3 * 24 * 60 * 60  # 3 days
+
 GITHUB_ISSUE_RE = r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/issues/\d+/?$"
 GITHUB_PR_RE = r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/pull/\d+/?$"
 GITHUB_REPO_RE = re.compile(
@@ -26,6 +34,24 @@ GITHUB_REPO_RE = re.compile(
 )
 SHA_HEADER_RE = re.compile(r"^From ([0-9a-fA-F]{40})\b", flags=re.MULTILINE)
 SHA_LOOSE_RE = re.compile(r"\b([0-9a-fA-F]{40})\b")
+
+# Prefer the sandboxed consensus API. In SDK v0.3.0 the safe variant was
+# renamed `run_nondet_default` and bare `run_nondet` became the UNSAFE one, so
+# resolve defensively: run_nondet_default (new safe) -> run_nondet (old safe)
+# -> run_nondet_unsafe (last resort).
+def _run_nondet(leader_fn, validator_fn):
+    fn = (
+        getattr(gl.vm, "run_nondet_default", None)
+        or getattr(gl.vm, "run_nondet", None)
+        or gl.vm.run_nondet_unsafe
+    )
+    return fn(leader_fn, validator_fn)
+
+
+def _now_epoch() -> int:
+    """Deterministic transaction timestamp in whole seconds. All validators
+    see the same value in deterministic mode."""
+    return int(gl.vm.get_timestamp().timestamp())
 
 
 def _addr_str(addr: Address) -> str:
@@ -97,6 +123,10 @@ class Contract(gl.Contract):
         return self.total_locked
 
     @gl.public.view
+    def get_claim_timeout(self) -> u256:
+        return u256(CLAIM_TIMEOUT_SECONDS)
+
+    @gl.public.view
     def list_bounties(self, start: u256, limit: u256) -> str:
         start_i = int(start)
         limit_i = min(int(limit), 50)
@@ -145,6 +175,7 @@ class Contract(gl.Contract):
             "fixes_issue": None,
             "wallet_bound": None,
             "head_sha": "",
+            "claimed_at": "0",
             "payout": "0",
             "refund": "0",
         }
@@ -180,6 +211,9 @@ class Contract(gl.Contract):
         record["pr_url"] = pr_url
         record["claimer"] = claimer_addr
         record["status"] = STATUS_CLAIMED
+        # Stamp the claim so the escrow can be recovered after a timeout and so
+        # third parties cannot prematurely adjudicate an in-progress claim.
+        record["claimed_at"] = str(_now_epoch())
         self.bounties[bounty_id] = json.dumps(record, sort_keys=True)
 
     @gl.public.write
@@ -196,8 +230,24 @@ class Contract(gl.Contract):
         claimer_str = record["claimer"]
         sponsor_str = record["sponsor"]
         amount = int(record["amount"])
+        claimed_at = int(record.get("claimed_at", "0") or "0")
         owner_repo = _extract_repo(pr_url)
         pr_patch_url = pr_url.rstrip("/") + ".patch"
+
+        # --- Authorization: no premature close by an unrelated wallet ---
+        # Only the claimer or the sponsor may settle a fresh claim. Anyone may
+        # settle once the claim window has elapsed (so a stale claim never
+        # blocks the bounty). This closes the "any wallet can prematurely
+        # close an escrowed bounty" finding without making adjudication
+        # permissioned forever.
+        caller = _addr_str(gl.message.sender_address).lower()
+        is_party = caller == claimer_str.lower() or caller == sponsor_str.lower()
+        window_open = (_now_epoch() - claimed_at) < CLAIM_TIMEOUT_SECONDS
+        if not is_party and window_open:
+            raise gl.vm.UserError(
+                "Only the claimer or sponsor can adjudicate before the claim "
+                "window elapses"
+            )
 
         def leader_fn():
             def fetch(url):
@@ -211,13 +261,13 @@ class Contract(gl.Contract):
             if not issue_page:
                 raise gl.vm.UserError("Issue page not retrievable")
 
-            # --- Evidence source 2: PR content (git format-patch) ---
-            # The .patch endpoint returns the concatenated commits of the PR
-            # as git format-patch. Every commit header starts with
-            # `From <40-hex-sha>` where the SHA is the immutable commit id.
-            # This is still MUTABLE when the PR gets force-pushed, but we
-            # never trust its content for the verdict — we only extract the
-            # head SHA and then re-fetch that commit by SHA below.
+            # --- Evidence source 2: the FULL PR change (all commits) ---
+            # The `<pr>.patch` endpoint returns git format-patch for EVERY
+            # commit in the PR, concatenated. This is the full, cumulative
+            # change the reviewer asked us to evaluate. Judging only the head
+            # commit (as v0.3.x did) let a contributor hide the real work
+            # behind an empty marker commit — the head diff would be empty and
+            # adjudication inspected the wrong thing. We judge the whole thing.
             pr_patch = fetch(pr_patch_url)
             if not pr_patch:
                 raise gl.vm.UserError("PR patch not retrievable")
@@ -229,13 +279,17 @@ class Contract(gl.Contract):
                 raise gl.vm.UserError(
                     "Cannot pin PR to an immutable commit SHA"
                 )
+            # The last `From <sha>` header is the PR head commit. Pinning to it
+            # makes every validator agree on which snapshot is being judged; a
+            # force-push mid-consensus changes the SHA and consensus fails safe
+            # (the sponsor can then recover via reclaim_expired_claim).
             head_sha = sha_hits[-1].lower()
 
-            # --- Evidence source 3: SHA-pinned immutable commit patch ---
+            # --- Evidence source 3: SHA-pinned immutable head commit patch ---
             # github.com/<owner>/<repo>/commit/<sha>.patch is cryptographically
-            # bound to `sha` — the PR author cannot change its content without
-            # also changing the SHA. This is the "immutable diff" the judge
-            # asked for.
+            # bound to `sha` — its content cannot change without changing the
+            # SHA. We use it ONLY to bind the claiming wallet (below); the code
+            # quality itself is judged from the full PR patch above.
             owner, repo = owner_repo
             commit_url = (
                 "https://github.com/"
@@ -253,31 +307,34 @@ class Contract(gl.Contract):
                 )
 
             # --- Deterministic wallet-identity binding ---
-            # We require the claiming wallet address to appear verbatim inside
-            # the SHA-pinned commit patch. The commit patch is:
-            #   (a) contributor-controlled — its content (commit message,
-            #       author metadata) is written by the PR author, not by
-            #       random third-party commenters on the PR page.
-            #   (b) immutable — cryptographically bound to `head_sha`, so
-            #       nobody can retroactively insert or remove the wallet.
-            # This closes both v0.3.0 review findings in one check.
+            # The claiming wallet must appear verbatim inside the SHA-pinned
+            # head commit patch. That content is contributor-authored (commit
+            # message / author metadata, not third-party PR comments) and
+            # immutable (bound to head_sha). The documented claim workflow is
+            # an empty marker commit `Bounty claim by: 0x...` pushed last, so
+            # it lands here as the head commit. This binds identity securely
+            # while the full-PR judgement above still sees the real work.
             wallet_bound = bool(claimer_str) and (
                 claimer_str.lower() in commit_patch.lower()
             )
 
             prompt = (
                 "You are judging whether a GitHub Pull Request actually fixes "
-                "the linked GitHub issue. Be strict. Reject trivial changes "
-                "(whitespace, comment-only, unrelated file edits) even if the "
-                "commit subject claims a fix. Reward substantive code changes "
-                "that address the root cause described in the issue, "
-                "especially when tests are added.\n\n"
+                "the linked GitHub issue. Judge the ENTIRE cumulative change "
+                "of the PR (all commits below), not any single commit. Ignore "
+                "empty or marker-only commits (e.g. a commit that only carries "
+                "a 'Bounty claim by: 0x...' line) — they are identity markers, "
+                "not the fix. Be strict: reject trivial changes (whitespace, "
+                "comment-only, unrelated file edits) even if a commit subject "
+                "claims a fix. Reward substantive code that addresses the root "
+                "cause described in the issue, especially when tests are "
+                "added.\n\n"
                 "ISSUE PAGE (text, truncated):\n"
                 + issue_page[:3500]
-                + "\n\nIMMUTABLE COMMIT PATCH pinned to SHA "
+                + "\n\nFULL PR PATCH — all commits, head pinned to SHA "
                 + head_sha
                 + " (truncated):\n"
-                + commit_patch[:6000]
+                + pr_patch[:8000]
                 + "\n\nReturn JSON ONLY with keys:\n"
                 + '  "fixes_issue": boolean,\n'
                 + '  "quality": "LOW"|"MID"|"HIGH",\n'
@@ -314,8 +371,7 @@ class Contract(gl.Contract):
                 return False
             return True
 
-        run_nondet = getattr(gl.vm, "run_nondet", gl.vm.run_nondet_unsafe)
-        verdict = run_nondet(leader_fn, validator_fn)
+        verdict = _run_nondet(leader_fn, validator_fn)
 
         wallet_bound = bool(verdict.get("wallet_bound"))
         quality = verdict["quality"]
@@ -360,6 +416,42 @@ class Contract(gl.Contract):
         record["reason"] = final_reason
         record["payout"] = str(payout)
         record["refund"] = str(refund)
+        self.bounties[bounty_id] = json.dumps(record, sort_keys=True)
+        self.total_locked = u256(int(self.total_locked) - amount)
+
+    @gl.public.write
+    def reclaim_expired_claim(self, bounty_id: str) -> None:
+        """Authorized recovery path for a stalled claim.
+
+        Once a bounty has sat in CLAIMED for longer than CLAIM_TIMEOUT_SECONDS
+        without settling (e.g. the PR or issue page became unreachable so
+        adjudication keeps reverting), the sponsor — and only the sponsor —
+        can recover their escrow in full. This removes the "any wallet can
+        strand an escrowed bounty" failure mode: escrow can never be locked
+        forever, and only the party that funded it can pull it back."""
+        raw = self.bounties.get(bounty_id, "")
+        if not raw:
+            raise gl.vm.UserError("Bounty not found")
+        record = json.loads(raw)
+        if record["status"] != STATUS_CLAIMED:
+            raise gl.vm.UserError("Only a claimed bounty can be reclaimed")
+
+        sponsor_str = record["sponsor"]
+        if _addr_str(gl.message.sender_address).lower() != sponsor_str.lower():
+            raise gl.vm.UserError("Only the sponsor can reclaim")
+
+        claimed_at = int(record.get("claimed_at", "0") or "0")
+        if (_now_epoch() - claimed_at) < CLAIM_TIMEOUT_SECONDS:
+            raise gl.vm.UserError("Claim window has not elapsed yet")
+
+        amount = int(record["amount"])
+        gl.get_contract_at(Address(sponsor_str)).emit_transfer(value=u256(amount))
+        record["status"] = STATUS_EXPIRED
+        record["reason"] = (
+            "Claim expired without settling — escrow recovered by sponsor "
+            "after the claim window."
+        )
+        record["refund"] = str(amount)
         self.bounties[bounty_id] = json.dumps(record, sort_keys=True)
         self.total_locked = u256(int(self.total_locked) - amount)
 
